@@ -502,11 +502,21 @@ didCompleteWithError:(NSError *)error {
    didSendBodyData:(int64_t)bytesSent
     totalBytesSent:(int64_t)totalBytesSent
 totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend {
-    float progress = -1;
-    if (totalBytesExpectedToSend > 0) { // see documentation.  For unknown size it's -1 (NSURLSessionTransferSizeUnknown)
-        progress = 100.0 * (float)totalBytesSent / (float)totalBytesExpectedToSend;
-    }
-    [self _sendEventWithName:@"RNFileUploader-progress" body:@{ @"id": task.taskDescription, @"progress": [NSNumber numberWithFloat:progress] }];
+    // for some reason we're sometimes getting *** -[__NSPlaceholderDictionary initWithObjects:forKeys:count:]: attempt to insert nil object from objects[0]
+    // no idea why, so just catch and log the error
+    //
+    // https://scribeware-bo.sentry.io/issues/5386385626/events/a0cd584421f04e05be9ac01853b7fa00/?project=5288441&query=release%3Acom.scribeware.ios%406.178.186%2B530+error.unhandled%3Atrue&referrer=previous-event&sort=freq&statsPeriod=7d&stream_index=0
+    @try {
+        float progress = -1;
+        if (totalBytesExpectedToSend > 0) { // see documentation.  For unknown size it's -1 (NSURLSessionTransferSizeUnknown)
+            progress = 100.0 * (float)totalBytesSent / (float)totalBytesExpectedToSend;
+        }
+        [self _sendEventWithName:@"RNFileUploader-progress" body:@{ @"id": task.taskDescription, @"progress": [NSNumber numberWithFloat:progress] }];
+    } 
+    @catch (NSException *exception) {
+        NSLog(@"Exception: %@", exception);
+    } 
+
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
