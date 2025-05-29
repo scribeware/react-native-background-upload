@@ -108,87 +108,6 @@ static VydiaRNFileUploader *sharedInstance;
 
 
 /*
- Gets file information for the path specified.  Example valid path is: file:///var/mobile/Containers/Data/Application/3C8A0EFB-A316-45C0-A30A-761BF8CCF2F8/tmp/trim.A5F76017-14E9-4890-907E-36A045AF9436.MOV
- Returns an object such as: {mimeType: "video/quicktime", size: 2569900, exists: true, name: "trim.AF9A9225-FC37-416B-A25B-4EDB8275A625.MOV", extension: "MOV"}
- */
-RCT_EXPORT_METHOD(getFileInfo:(NSString *)path resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject)
-{
-    @try {
-        NSURL *fileUri = [NSURL URLWithString: path];
-        NSString *pathWithoutProtocol = [fileUri path];
-        NSString *name = [fileUri lastPathComponent];
-        NSString *extension = [name pathExtension];
-        bool exists = [[NSFileManager defaultManager] fileExistsAtPath:pathWithoutProtocol];
-        NSMutableDictionary *params = [NSMutableDictionary dictionaryWithObjectsAndKeys: name, @"name", nil];
-        [params setObject:extension forKey:@"extension"];
-        [params setObject:[NSNumber numberWithBool:exists] forKey:@"exists"];
-
-        if (exists)
-        {
-            [params setObject:[self guessMIMETypeFromFileName:name] forKey:@"mimeType"];
-            NSError* error;
-            NSDictionary<NSFileAttributeKey, id> *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:pathWithoutProtocol error:&error];
-            if (error == nil)
-            {
-                unsigned long long fileSize = [attributes fileSize];
-                [params setObject:[NSNumber numberWithLong:fileSize] forKey:@"size"];
-            }
-        }
-        resolve(params);
-    }
-    @catch (NSException *exception) {
-        reject(@"RN Uploader", exception.name, nil);
-    }
-}
-
-/*
- Borrowed from http://stackoverflow.com/questions/2439020/wheres-the-iphone-mime-type-database
- */
-- (NSString *)guessMIMETypeFromFileName: (NSString *)fileName {
-    CFStringRef UTI = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, (__bridge CFStringRef)[fileName pathExtension], NULL);
-    CFStringRef MIMEType = UTTypeCopyPreferredTagWithClass(UTI, kUTTagClassMIMEType);
-    CFRelease(UTI);
-   
-    if (!MIMEType) {
-        return @"application/octet-stream";
-    }
-    
-    NSString *dest = [NSString stringWithString:(__bridge NSString *)(MIMEType)];
-    CFRelease(MIMEType);
-    return dest;
-}
-
-/*
- Utility method to copy a PHAsset file into a local temp file, which can then be uploaded.
- */
-- (void)copyAssetToFile: (NSString *)assetUrl completionHandler: (void(^)(NSString *__nullable tempFileUrl, NSError *__nullable error))completionHandler {
-    NSURL *url = [NSURL URLWithString:assetUrl];
-    PHAsset *asset = [PHAsset fetchAssetsWithALAssetURLs:@[url] options:nil].lastObject;
-    if (!asset) {
-        NSMutableDictionary* details = [NSMutableDictionary dictionary];
-        [details setValue:@"Asset could not be fetched.  Are you missing permissions?" forKey:NSLocalizedDescriptionKey];
-        completionHandler(nil,  [NSError errorWithDomain:@"RNUploader" code:5 userInfo:details]);
-        return;
-    }
-    PHAssetResource *assetResource = [[PHAssetResource assetResourcesForAsset:asset] firstObject];
-    NSString *pathToWrite = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
-    NSURL *pathUrl = [NSURL fileURLWithPath:pathToWrite];
-    NSString *fileURI = pathUrl.absoluteString;
-
-    PHAssetResourceRequestOptions *options = [PHAssetResourceRequestOptions new];
-    options.networkAccessAllowed = YES;
-
-    [[PHAssetResourceManager defaultManager] writeDataForAssetResource:assetResource toFile:pathUrl options:options completionHandler:^(NSError * _Nullable e) {
-        if (e == nil) {
-            completionHandler(fileURI, nil);
-        }
-        else {
-            completionHandler(nil, e);
-        }
-    }];
-}
-
-/*
  * Starts a file upload.
  * Options are passed in as the first argument as a js hash:
  * {
@@ -201,36 +120,60 @@ RCT_EXPORT_METHOD(getFileInfo:(NSString *)path resolve:(RCTPromiseResolveBlock)r
  */
 RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject)
 {
-
     NSString *uploadUrl = options[@"url"];
-    __block NSString *fileURI = options[@"path"] ?: @"";
+    NSString *fileURI = options[@"path"]; // No default, should be provided
     NSString *method = options[@"method"] ?: @"POST";
-    NSString *uploadType = options[@"type"] ?: @"raw";
-    NSString *fieldName = options[@"field"];
     NSString *customUploadId = options[@"customUploadId"];
     NSDictionary *headers = options[@"headers"];
-    NSDictionary *parameters = options[@"parameters"];
+    // NSString *uploadType = options[@"type"]; // No longer needed, assumed "raw"
+    // NSString *fieldName = options[@"field"]; // Multipart specific
+    // NSDictionary *parameters = options[@"parameters"]; // Multipart specific
 
-
-    NSString *thisUploadId = customUploadId;
-
-    if(!thisUploadId){
-        @synchronized(self)
-        {
-            thisUploadId = [NSString stringWithFormat:@"%lu", uploadId++];
-
+    // Basic validation for required options
+    if (!uploadUrl || [uploadUrl length] == 0) {
+        reject(@"RN Uploader", @"'url' option is required.", nil);
+        return;
+    }
+    if (!fileURI || [fileURI length] == 0) {
+        reject(@"RN Uploader", @"'path' option is required for raw upload.", nil);
+        return;
+    }
+    if ([fileURI hasPrefix:@"assets-library"]) {
+        reject(@"RN Uploader", @"'assets-library' paths are not supported in this simplified version. Please provide a direct file path.", nil);
+        return;
+    }
+    // Ensure fileURI is a valid file URL, e.g., starts with "file://"
+    // Or convert it to one if it's a raw path.
+    // For simplicity, assuming fileURI is already a valid file URL string as per original logic for `uploadTaskWithRequest:fromFile:`
+    NSURL *localFileUrl = [NSURL URLWithString:fileURI];
+    if (!localFileUrl || ![localFileUrl isFileURL]) {
+         // If it's a raw path, try to create a file URL
+        localFileUrl = [NSURL fileURLWithPath:fileURI isDirectory:NO];
+        if (!localFileUrl) { // Still nil or not a file URL
+            reject(@"RN Uploader", @"'path' option must be a valid file URI or absolute file path.", nil);
+            return;
         }
     }
 
 
+    NSString *thisUploadId = customUploadId;
+    if(!thisUploadId){
+        @synchronized(self)
+        {
+            thisUploadId = [NSString stringWithFormat:@"%lu", uploadId++];
+        }
+    }
+
     @try {
-        NSURL *requestUrl = [NSURL URLWithString: uploadUrl];
+        NSURL *requestUrl = [NSURL URLWithString:uploadUrl];
         if (requestUrl == nil) {
-            @throw @"Request URL cannot be nil";
+            // This was @throw in original, but reject is cleaner for RN modules
+            reject(@"RN Uploader", @"Request URL cannot be nil or is invalid.", nil);
+            return;
         }
 
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestUrl];
-        [request setHTTPMethod: method];
+        [request setHTTPMethod:method];
 
         [headers enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull val, BOOL * _Nonnull stop) {
             if ([val respondsToSelector:@selector(stringValue)]) {
@@ -241,53 +184,23 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
             }
         }];
 
+        // Directly use uploadTaskWithRequest:fromFile:
+        NSURLSessionUploadTask *uploadTask = [[self urlSession] uploadTaskWithRequest:request fromFile:localFileUrl];
 
-        // asset library files have to be copied over to a temp file.  they can't be uploaded directly
-        if ([fileURI hasPrefix:@"assets-library"]) {
-            dispatch_group_t group = dispatch_group_create();
-            dispatch_group_enter(group);
-            [self copyAssetToFile:fileURI completionHandler:^(NSString * _Nullable tempFileUrl, NSError * _Nullable error) {
-                if (error) {
-                    dispatch_group_leave(group);
-                    reject(@"RN Uploader", @"Asset could not be copied to temp file.", nil);
-                    return;
-                }
-                fileURI = tempFileUrl;
-                dispatch_group_leave(group);
-            }];
-            dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+        if (!uploadTask) {
+            // This can happen if the fileURL is invalid or inaccessible
+            reject(@"RN Uploader", [NSString stringWithFormat:@"Failed to create upload task. Check file path: %@", fileURI], nil);
+            return;
         }
-
-        NSURLSessionUploadTask *uploadTask;
-
-        if ([uploadType isEqualToString:@"multipart"]) {
-            NSString *uuidStr = [[NSUUID UUID] UUIDString];
-            [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", uuidStr] forHTTPHeaderField:@"Content-Type"];
-
-            NSData *httpBody = [self createBodyWithBoundary:uuidStr path:fileURI parameters: parameters fieldName:fieldName];
-
-            [request setHTTPBody: httpBody];
-            uploadTask = [[self urlSession] uploadTaskWithStreamedRequest:request];
-
-
-        } else {
-            if (parameters.count > 0) {
-                reject(@"RN Uploader", @"Parameters supported only in multipart type", nil);
-                return;
-            }
-
-            uploadTask = [[self urlSession] uploadTaskWithRequest:request fromFile:[NSURL URLWithString: fileURI]];
-        }
-
+        
         uploadTask.taskDescription = thisUploadId;
-        //NSLog(@"RNBU will start upload %@", uploadTask.taskDescription);
         [uploadTask resume];
         resolve(uploadTask.taskDescription);
     }
     @catch (NSException *exception) {
-        //NSLog(@"RNBU startUpload error: %@", exception);
-        reject(@"RN Uploader", exception.name, nil);
+        reject(@"RN Uploader", exception.name, exception.reason); // Include reason
     }
+}
 }
 
 /*
@@ -394,44 +307,6 @@ RCT_EXPORT_METHOD(endBackgroundTask: (NSUInteger)taskId resolve:(RCTPromiseResol
 }
 
 
-
-- (NSData *)createBodyWithBoundary:(NSString *)boundary
-                         path:(NSString *)path
-                         parameters:(NSDictionary *)parameters
-                         fieldName:(NSString *)fieldName {
-
-    NSMutableData *httpBody = [NSMutableData data];
-
-
-
-    [parameters enumerateKeysAndObjectsUsingBlock:^(NSString *parameterKey, NSString *parameterValue, BOOL *stop) {
-        [httpBody appendData:[[NSString stringWithFormat:@"--%@\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
-        [httpBody appendData:[[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"\r\n\r\n", parameterKey] dataUsingEncoding:NSUTF8StringEncoding]];
-        [httpBody appendData:[[NSString stringWithFormat:@"%@\r\n", parameterValue] dataUsingEncoding:NSUTF8StringEncoding]];
-    }];
-
-
-    // resolve path
-    if ([path length] > 0){
-        NSURL *fileUri = [NSURL URLWithString: path];
-        NSString *pathWithoutProtocol = [fileUri path];
-
-        NSData *data = [[NSFileManager defaultManager] contentsAtPath:pathWithoutProtocol];
-        NSString *filename  = [path lastPathComponent];
-        NSString *mimetype  = [self guessMIMETypeFromFileName:path];
-
-        [httpBody appendData:[[NSString stringWithFormat:@"--%@\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
-        [httpBody appendData:[[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"; filename=\"%@\"\r\n", fieldName, filename] dataUsingEncoding:NSUTF8StringEncoding]];
-        [httpBody appendData:[[NSString stringWithFormat:@"Content-Type: %@\r\n\r\n", mimetype] dataUsingEncoding:NSUTF8StringEncoding]];
-        [httpBody appendData:data];
-        [httpBody appendData:[@"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
-
-    }
-
-    [httpBody appendData:[[NSString stringWithFormat:@"--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
-
-    return httpBody;
-}
 
 - (NSURLSession *)urlSession {
     @synchronized (self) {
