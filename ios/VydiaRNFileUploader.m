@@ -201,7 +201,7 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
         reject(@"RN Uploader", exception.name, exception.reason); // Include reason
     }
 }
-}
+
 
 /*
  * Cancels file upload
